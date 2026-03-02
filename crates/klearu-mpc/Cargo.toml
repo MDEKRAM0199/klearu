@@ -1,0 +1,13 @@
+[package]
+name = "klearu-mpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "2-party computation building blocks for private SLIDE inference"
+
+[dependencies]
+klearu-dpf = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+crossbeam = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "klearu"
+description = "Sub-linear deep learning engine based on SLIDE and successors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+simd = ["klearu-accel"]
+bf16 = ["klearu-accel"]
+mongoose = ["dep:klearu-mongoose"]
+bolt = ["dep:klearu-bolt"]
+deja-vu = ["dep:klearu-dejavu"]
+llm = ["dep:klearu-llm"]
+full = ["simd", "bf16", "mongoose", "bolt", "deja-vu", "llm"]
+
+[dependencies]
+klearu-core = { workspace = true }
+klearu-accel = { workspace = true, optional = true }
+klearu-mongoose = { workspace = true, optional = true }
+klearu-bolt = { workspace = true, optional = true }
+klearu-dejavu = { workspace = true, optional = true }
+klearu-llm = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+rand_distr = { workspace = true }

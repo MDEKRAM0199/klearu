@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+
+# Model weights (large files, download separately)
+SmolLM-135M-Instruct/
+SmolLM2-1.7B/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

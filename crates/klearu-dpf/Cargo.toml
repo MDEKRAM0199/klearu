@@ -1,0 +1,10 @@
+[package]
+name = "klearu-dpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Distributed Point Functions and Distributed Comparison Functions for private inference"
+
+[dependencies]
+aes = "0.8"

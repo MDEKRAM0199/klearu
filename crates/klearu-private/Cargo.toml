@@ -1,0 +1,29 @@
+[package]
+name = "klearu-private"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Private SLIDE inference via 2-party computation with Ferret OT"
+
+[features]
+default = []
+oprf-sparse = ["klearu-llm/sparse"]
+
+[dependencies]
+klearu-mpc = { workspace = true }
+klearu-llm = { workspace = true }
+ferret = { path = "../../../monorepo/crates/ferret" }
+curve25519-dalek = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+aes = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "private-server"
+path = "src/bin/private_server.rs"
+
+[[bin]]
+name = "private-client"
+path = "src/bin/private_client.rs"

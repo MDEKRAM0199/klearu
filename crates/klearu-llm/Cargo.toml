@@ -1,0 +1,44 @@
+[package]
+name = "klearu-llm"
+description = "LLM inference engine with SLIDE-based sparsity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+sparse = ["dep:klearu-dejavu"]
+
+[dependencies]
+klearu-core = { workspace = true }
+klearu-accel = { workspace = true }
+klearu-dejavu = { workspace = true, optional = true }
+
+half = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+rand = { workspace = true }
+safetensors = "0.4"
+tokenizers = "0.20"
+memmap2 = "0.9"
+
+[[bin]]
+name = "chat"
+path = "src/bin/chat.rs"
+
+[[bin]]
+name = "diagnose"
+path = "src/bin/diagnose.rs"
+
+[[bin]]
+name = "calibrate"
+path = "src/bin/calibrate.rs"
+required-features = ["sparse"]
+
+[dev-dependencies]
+rand_distr = { workspace = true }

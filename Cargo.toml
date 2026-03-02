@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/klearu-core",
+    "crates/klearu-accel",
+    "crates/klearu-mongoose",
+    "crates/klearu-bolt",
+    "crates/klearu-dejavu",
+    "crates/klearu-llm",
+    "crates/klearu",
+    "crates/klearu-dpf",
+    "crates/klearu-mpc",
+    "crates/klearu-private",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-AGPL-3.0-with-Quilibrium-Additional-Terms"
+repository = "https://github.com/quilibrium/klearu"
+
+[workspace.dependencies]
+# Internal crates
+klearu-core = { path = "crates/klearu-core" }
+klearu-accel = { path = "crates/klearu-accel" }
+klearu-mongoose = { path = "crates/klearu-mongoose" }
+klearu-bolt = { path = "crates/klearu-bolt" }
+klearu-dejavu = { path = "crates/klearu-dejavu" }
+klearu-llm = { path = "crates/klearu-llm" }
+klearu-dpf = { path = "crates/klearu-dpf" }
+klearu-mpc = { path = "crates/klearu-mpc" }
+klearu-private = { path = "crates/klearu-private" }
+
+# Core dependencies
+ndarray = { version = "0.16", features = ["rayon"] }
+rayon = "1.10"
+rand = "0.8"
+rand_distr = "0.4"
+num-traits = "0.2"
+half = { version = "2.4", features = ["num-traits", "serde", "bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+bytemuck = { version = "1", features = ["derive"] }
+safetensors = "0.4"
+tokenizers = "0.20"
+memmap2 = "0.9"
+parking_lot = "0.12"
+crossbeam = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+aes = "0.8"
+curve25519-dalek = { version = "4", features = ["serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

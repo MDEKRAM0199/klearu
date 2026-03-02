@@ -1,0 +1,19 @@
+[package]
+name = "klearu-bolt"
+description = "BOLT: autotuning, sparse inference, and label-aware insertion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+klearu-core = { workspace = true }
+ndarray = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }

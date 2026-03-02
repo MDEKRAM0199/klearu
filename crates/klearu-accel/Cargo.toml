@@ -1,0 +1,20 @@
+[package]
+name = "klearu-accel"
+description = "SIMD, BF16, and memory optimizations for SLIDE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+klearu-core = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
