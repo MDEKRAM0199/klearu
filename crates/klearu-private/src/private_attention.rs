@@ -17,8 +17,8 @@ use klearu_llm::model::kv_cache::KvCache;
 use klearu_llm::model::rope::RotaryEmbedding;
 use klearu_mpc::fixed_point::{from_fixed, from_fixed64};
 use klearu_mpc::linear::{
-    shared_linear_forward, shared_linear_forward_64, shared_linear_forward_f32_input,
-    shared_linear_forward_f32_input_64,
+    shared_linear_forward, shared_linear_forward_64_pq,
+    shared_linear_forward_f32_input, shared_linear_forward_f32_input_64,
 };
 use klearu_mpc::transport::Transport;
 use klearu_mpc::{SharedVec, SharedVec64};
@@ -62,8 +62,10 @@ fn reveal_f32(
 /// Compute softmax scores and weighted V sum for one head.
 /// `scores` are fully public attention scores for this head over seq_len positions.
 /// Accumulates weighted V into `output[head_offset..head_offset + head_dim]`.
+/// `exp_buffer` is a reusable scratch buffer to avoid per-head allocation.
 fn softmax_weighted_v(
     scores: &[f32],
+    exp_buffer: &mut Vec<f32>,
     kv_h: usize,
     head_dim: usize,
     head_offset: usize,
@@ -72,14 +74,15 @@ fn softmax_weighted_v(
 ) {
     let seq_len = scores.len();
     let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut exp_scores: Vec<f32> = scores.iter().map(|&s| (s - max_score).exp()).collect();
-    let sum: f32 = exp_scores.iter().sum();
-    for s in &mut exp_scores {
+    exp_buffer.clear();
+    exp_buffer.extend(scores.iter().map(|&s| (s - max_score).exp()));
+    let sum: f32 = exp_buffer.iter().sum();
+    for s in exp_buffer.iter_mut() {
         *s /= sum;
     }
     for t in 0..seq_len {
         let v_slice = kv_cache.v_at(kv_h, t);
-        let w = exp_scores[t];
+        let w = exp_buffer[t];
         for d in 0..head_dim {
             output[head_offset + d] += w * v_slice[d];
         }
@@ -173,6 +176,7 @@ pub fn private_attention_forward(
 
         // 6. Compute attention scores (fully public: Q·K, no exchange needed)
         let mut output_f32 = vec![0.0f32; q_out];
+        let mut exp_buffer = Vec::with_capacity(seq_len);
         for h in 0..num_heads {
             let kv_h = h / gqa_group_size;
             let q_offset = h * head_dim;
@@ -186,7 +190,7 @@ pub fn private_attention_forward(
                     s * scale
                 })
                 .collect();
-            softmax_weighted_v(&scores, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
+            softmax_weighted_v(&scores, &mut exp_buffer, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
         }
 
         // 7. Reveal gate → sigmoid → multiply output shares
@@ -256,11 +260,12 @@ pub fn private_attention_forward(
 
         // 7. Softmax + weighted V sum
         let mut output_f32 = vec![0.0f32; q_out];
+        let mut exp_buffer = Vec::with_capacity(seq_len);
         for h in 0..num_heads {
             let kv_h = h / gqa_group_size;
             let score_offset = h * seq_len;
             let scores = &true_scores[score_offset..score_offset + seq_len];
-            softmax_weighted_v(scores, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
+            softmax_weighted_v(scores, &mut exp_buffer, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
         }
 
         // 8. O projection
@@ -276,7 +281,7 @@ pub fn private_attention_forward(
 ///
 /// Q is revealed (same leakage). For gated attention: K and gate also revealed.
 pub fn private_attention_forward_secure(
-    party: u8,
+    _party: u8,
     attention: &Attention,
     x_share: &SharedVec64,
     position: usize,
@@ -292,13 +297,13 @@ pub fn private_attention_forward_secure(
     let q_out = num_heads * head_dim;
     let kv_out = num_kv_heads * head_dim;
 
-    // K/V projections (same for both paths)
-    let k_share = shared_linear_forward_64(
-        party, attention.k_proj.weights.as_raw_slice(), hidden_size, kv_out, x_share, &[], transport,
-    )?;
-    let v_share = shared_linear_forward_64(
-        party, attention.v_proj.weights.as_raw_slice(), hidden_size, kv_out, x_share, &[], transport,
-    )?;
+    // K/V projections using pre-quantized weights (same for both paths)
+    let k_share = shared_linear_forward_64_pq(
+        &attention.k_proj.weights_q32, hidden_size, kv_out, x_share,
+    );
+    let v_share = shared_linear_forward_64_pq(
+        &attention.v_proj.weights_q32, hidden_size, kv_out, x_share,
+    );
 
     let v_cache_f32: Vec<f32> = v_share.0.iter().map(|&v| from_fixed64(v)).collect();
 
@@ -307,9 +312,9 @@ pub fn private_attention_forward_secure(
 
         // 1. Q projection (doubled), de-interleave per head
         let q_out_doubled = q_out * 2;
-        let q_gate_share = shared_linear_forward_64(
-            party, attention.q_proj.weights.as_raw_slice(), hidden_size, q_out_doubled, x_share, &[], transport,
-        )?;
+        let q_gate_share = shared_linear_forward_64_pq(
+            &attention.q_proj.weights_q32, hidden_size, q_out_doubled, x_share,
+        );
 
         let mut q_vals = vec![0u64; q_out];
         let mut gate_vals = vec![0u64; q_out];
@@ -357,6 +362,7 @@ pub fn private_attention_forward_secure(
 
         // 6. Compute attention scores (fully public)
         let mut output_f32 = vec![0.0f32; q_out];
+        let mut exp_buffer = Vec::with_capacity(seq_len);
         for h in 0..num_heads {
             let kv_h = h / gqa_group_size;
             let q_offset = h * head_dim;
@@ -370,7 +376,7 @@ pub fn private_attention_forward_secure(
                     s * scale
                 })
                 .collect();
-            softmax_weighted_v(&scores, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
+            softmax_weighted_v(&scores, &mut exp_buffer, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
         }
 
         // 7. Reveal gate → sigmoid → multiply output shares
@@ -387,10 +393,10 @@ pub fn private_attention_forward_secure(
     } else {
         // --- Standard attention path ---
 
-        // 1. Q projection
-        let q_share = shared_linear_forward_64(
-            party, attention.q_proj.weights.as_raw_slice(), hidden_size, q_out, x_share, &[], transport,
-        )?;
+        // 1. Q projection using pre-quantized weights
+        let q_share = shared_linear_forward_64_pq(
+            &attention.q_proj.weights_q32, hidden_size, q_out, x_share,
+        );
 
         // 2. RoPE on shares
         let mut q_f32: Vec<f32> = q_share.0.iter().map(|&v| from_fixed64(v)).collect();
@@ -440,11 +446,12 @@ pub fn private_attention_forward_secure(
 
         // 7. Softmax + weighted V sum
         let mut output_f32 = vec![0.0f32; q_out];
+        let mut exp_buffer = Vec::with_capacity(seq_len);
         for h in 0..num_heads {
             let kv_h = h / gqa_group_size;
             let score_offset = h * seq_len;
             let scores = &true_scores[score_offset..score_offset + seq_len];
-            softmax_weighted_v(scores, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
+            softmax_weighted_v(scores, &mut exp_buffer, kv_h, head_dim, h * head_dim, kv_cache, &mut output_f32);
         }
 
         // 8. O projection
@@ -485,13 +492,18 @@ fn dn_l2_normalize(x: &mut [f32]) {
     }
 }
 
-/// Reveal Q32.32 shares as f32: convert to f32, exchange, reconstruct by adding.
-fn reveal_fixed64_as_f32(
+/// Reveal Q32.32 shares as f32: exchange u64 shares directly, reconstruct in u64
+/// (exact wrapping add), then convert to f32 once. Avoids double f32 conversion
+/// and the precision loss from adding two f32 approximations.
+fn reveal_u64_as_f32(
     share: &[u64],
     transport: &mut impl Transport,
 ) -> io::Result<Vec<f32>> {
-    let f32_vals: Vec<f32> = share.iter().map(|&v| from_fixed64(v)).collect();
-    reveal_f32(&f32_vals, transport)
+    transport.send_u64_slice(share)?;
+    let other = transport.recv_u64_slice(share.len())?;
+    Ok(share.iter().zip(other.iter())
+        .map(|(&a, &b)| from_fixed64(a.wrapping_add(b)))
+        .collect())
 }
 
 /// Secure (Q32.32) GatedDeltaNet forward pass.
@@ -517,22 +529,22 @@ pub fn private_deltanet_forward_secure(
     let qkv_dim = conv_dim; // = num_heads*key_dim*2 + num_heads*value_dim
     let z_dim = num_heads * value_dim;
 
-    // 1. MPC linear projections (local, no communication — public weights × Q32.32 shares)
-    let qkv_share = shared_linear_forward_64(
-        party, dn.in_proj_qkv.weights.as_raw_slice(), hidden_size, qkv_dim, x_share, &[], transport,
-    )?;
-    let z_share = shared_linear_forward_64(
-        party, dn.in_proj_z.weights.as_raw_slice(), hidden_size, z_dim, x_share, &[], transport,
-    )?;
-    let a_share = shared_linear_forward_64(
-        party, dn.in_proj_a.weights.as_raw_slice(), hidden_size, num_heads, x_share, &[], transport,
-    )?;
-    let b_share = shared_linear_forward_64(
-        party, dn.in_proj_b.weights.as_raw_slice(), hidden_size, num_heads, x_share, &[], transport,
-    )?;
+    // 1. MPC linear projections using pre-quantized weights (local, no communication)
+    let qkv_share = shared_linear_forward_64_pq(
+        &dn.in_proj_qkv.weights_q32, hidden_size, qkv_dim, x_share,
+    );
+    let z_share = shared_linear_forward_64_pq(
+        &dn.in_proj_z.weights_q32, hidden_size, z_dim, x_share,
+    );
+    let a_share = shared_linear_forward_64_pq(
+        &dn.in_proj_a.weights_q32, hidden_size, num_heads, x_share,
+    );
+    let b_share = shared_linear_forward_64_pq(
+        &dn.in_proj_b.weights_q32, hidden_size, num_heads, x_share,
+    );
 
     // 2. Reveal QKV (needed for conv + SiLU which are nonlinear)
-    let qkv_plain = reveal_fixed64_as_f32(&qkv_share.0, transport)?;
+    let qkv_plain = reveal_u64_as_f32(&qkv_share.0, transport)?;
 
     // 3. Conv + SiLU (plaintext, both parties identical)
     let conv_pos = state.conv_pos;
@@ -571,9 +583,18 @@ pub fn private_deltanet_forward_secure(
         }
     }
 
-    // 5. Reveal a, b → compute alpha/beta gates
-    let a_plain = reveal_fixed64_as_f32(&a_share.0, transport)?;
-    let b_plain = reveal_fixed64_as_f32(&b_share.0, transport)?;
+    // 5. Reveal a, b in a single batch → compute alpha/beta gates (saves 1 round trip)
+    let mut ab_shares = Vec::with_capacity(num_heads * 2);
+    ab_shares.extend_from_slice(&a_share.0);
+    ab_shares.extend_from_slice(&b_share.0);
+    transport.send_u64_slice(&ab_shares)?;
+    let ab_other = transport.recv_u64_slice(num_heads * 2)?;
+    let a_plain: Vec<f32> = (0..num_heads)
+        .map(|i| from_fixed64(ab_shares[i].wrapping_add(ab_other[i])))
+        .collect();
+    let b_plain: Vec<f32> = (0..num_heads)
+        .map(|i| from_fixed64(ab_shares[num_heads + i].wrapping_add(ab_other[num_heads + i])))
+        .collect();
 
     let mut alpha = vec![0.0f32; num_heads];
     for h in 0..num_heads {
@@ -604,37 +625,40 @@ pub fn private_deltanet_forward_secure(
             *val *= a;
         }
 
-        // err_j = v_j - sum_i(S[i,j] * k_i)
-        let mut err = vec![0.0f32; value_dim];
-        for j in 0..value_dim {
-            let mut dot = 0.0f32;
-            for i in 0..key_dim {
-                dot += s[i * value_dim + j] * k_h[i];
+        // err = v - S^T·k  (restructured for contiguous inner-loop access)
+        let mut err: Vec<f32> = v_h.to_vec();
+        for i in 0..key_dim {
+            let k_i = k_h[i];
+            let s_row = &s[i * value_dim..(i + 1) * value_dim];
+            for j in 0..value_dim {
+                err[j] -= s_row[j] * k_i;
             }
-            err[j] = v_h[j] - dot;
         }
 
         // S[i,j] += beta * k_i * err_j
         let b = beta[h];
         for i in 0..key_dim {
+            let bk = b * k_h[i];
+            let s_row = &mut s[i * value_dim..(i + 1) * value_dim];
             for j in 0..value_dim {
-                s[i * value_dim + j] += b * k_h[i] * err[j];
+                s_row[j] += bk * err[j];
             }
         }
 
-        // o_j = sum_i(S[i,j] * q_i)
+        // o = S^T·q  (restructured for contiguous inner-loop access)
         let o_h = &mut output_heads[h * value_dim..(h + 1) * value_dim];
-        for j in 0..value_dim {
-            let mut dot = 0.0f32;
-            for i in 0..key_dim {
-                dot += s[i * value_dim + j] * q_h[i];
+        o_h.fill(0.0);
+        for i in 0..key_dim {
+            let q_i = q_h[i];
+            let s_row = &s[i * value_dim..(i + 1) * value_dim];
+            for j in 0..value_dim {
+                o_h[j] += s_row[j] * q_i;
             }
-            o_h[j] = dot;
         }
     }
 
     // 7. Reveal Z → output gate: rms_norm(o) * silu(z)
-    let z_plain = reveal_fixed64_as_f32(&z_share.0, transport)?;
+    let z_plain = reveal_u64_as_f32(&z_share.0, transport)?;
 
     for h in 0..num_heads {
         let o_h = &mut output_heads[h * value_dim..(h + 1) * value_dim];

@@ -7,7 +7,9 @@ repository.workspace = true
 description = "2-party computation building blocks for private SLIDE inference"
 
 [dependencies]
+klearu-accel = { workspace = true }
 klearu-dpf = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 crossbeam = { workspace = true }
+bytemuck = { workspace = true }

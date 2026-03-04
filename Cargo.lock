@@ -974,7 +974,9 @@ dependencies = [
 name = "klearu-mpc"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "crossbeam",
+ "klearu-accel",
  "klearu-dpf",
  "rand 0.8.5",
  "thiserror 2.0.18",

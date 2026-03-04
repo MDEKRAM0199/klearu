@@ -115,13 +115,18 @@ impl Model {
     pub fn forward_decode(&mut self, token_id: u32, position: usize) -> Vec<f32> {
         let hidden_size = self.config.hidden_size;
         let vocab_size = self.config.vocab_size;
+        let intermediate_size = self.config.intermediate_size;
 
         // Embed the token
         let mut hidden = vec![0.0f32; hidden_size];
         self.embedding.forward(token_id, &mut hidden);
 
-        // Scratch buffers
+        // Pre-allocate all scratch buffers (reused across layers)
         let mut norm_buf = vec![0.0f32; hidden_size];
+        let mut attn_out = vec![0.0f32; hidden_size];
+        let mut mlp_out = vec![0.0f32; hidden_size];
+        let mut gate_buf = vec![0.0f32; intermediate_size];
+        let mut up_buf = vec![0.0f32; intermediate_size];
 
         for layer_idx in 0..self.config.num_layers {
             // Pre-attention norm
@@ -129,24 +134,25 @@ impl Model {
             self.layers[layer_idx].attn_norm.forward(&mut norm_buf);
 
             // Attention (dispatch based on layer type)
-            let attn_out = match &self.layers[layer_idx].attention {
+            match &self.layers[layer_idx].attention {
                 AttentionLayer::Standard(attn) => {
-                    attn.forward(
+                    attn.forward_into(
                         &norm_buf,
                         position,
                         &self.rope,
                         self.kv_caches.layer_mut(layer_idx),
-                    )
+                        &mut attn_out,
+                    );
                 }
                 AttentionLayer::GatedDeltaNet(dn) => {
                     let state = self.deltanet_states.layer_mut(layer_idx)
                         .expect("DeltaNet state missing for linear attention layer");
-                    dn.forward_decode(&norm_buf, state)
+                    dn.forward_decode_into(&norm_buf, state, &mut attn_out);
                 }
             };
 
             // Residual
-            for (h, a) in hidden.iter_mut().zip(attn_out.iter()) {
+            for (h, &a) in hidden.iter_mut().zip(attn_out.iter()) {
                 *h += a;
             }
 
@@ -155,10 +161,10 @@ impl Model {
             self.layers[layer_idx].mlp_norm.forward(&mut norm_buf);
 
             // MLP
-            let mlp_out = self.layers[layer_idx].mlp.forward(&norm_buf);
+            self.layers[layer_idx].mlp.forward_into(&norm_buf, &mut mlp_out, &mut gate_buf, &mut up_buf);
 
             // Residual
-            for (h, m) in hidden.iter_mut().zip(mlp_out.iter()) {
+            for (h, &m) in hidden.iter_mut().zip(mlp_out.iter()) {
                 *h += m;
             }
         }
@@ -180,6 +186,7 @@ impl Model {
     pub fn forward_decode_debug(&mut self, token_id: u32, position: usize) -> Vec<f32> {
         let hidden_size = self.config.hidden_size;
         let vocab_size = self.config.vocab_size;
+        let intermediate_size = self.config.intermediate_size;
 
         let mut hidden = vec![0.0f32; hidden_size];
         self.embedding.forward(token_id, &mut hidden);
@@ -188,24 +195,29 @@ impl Model {
         eprintln!("  emb first 8: {:?}", &hidden[..8]);
 
         let mut norm_buf = vec![0.0f32; hidden_size];
+        let mut attn_out = vec![0.0f32; hidden_size];
+        let mut mlp_out = vec![0.0f32; hidden_size];
+        let mut gate_buf = vec![0.0f32; intermediate_size];
+        let mut up_buf = vec![0.0f32; intermediate_size];
 
         for layer_idx in 0..self.config.num_layers {
             norm_buf.copy_from_slice(&hidden);
             self.layers[layer_idx].attn_norm.forward(&mut norm_buf);
 
-            let attn_out = match &self.layers[layer_idx].attention {
+            match &self.layers[layer_idx].attention {
                 AttentionLayer::Standard(attn) => {
-                    attn.forward(
+                    attn.forward_into(
                         &norm_buf,
                         position,
                         &self.rope,
                         self.kv_caches.layer_mut(layer_idx),
-                    )
+                        &mut attn_out,
+                    );
                 }
                 AttentionLayer::GatedDeltaNet(dn) => {
                     let state = self.deltanet_states.layer_mut(layer_idx)
                         .expect("DeltaNet state missing");
-                    dn.forward_decode(&norm_buf, state)
+                    dn.forward_decode_into(&norm_buf, state, &mut attn_out);
                 }
             };
 
@@ -215,7 +227,7 @@ impl Model {
                 eprintln!("  L3 attn_out first 8: {:?}", &attn_out[..8]);
                 eprintln!("  L3 attn_out norm: {:.6}", attn_norm);
             }
-            for (h, a) in hidden.iter_mut().zip(attn_out.iter()) {
+            for (h, &a) in hidden.iter_mut().zip(attn_out.iter()) {
                 *h += a;
             }
             // Debug: print hidden after attention residual at layer 3
@@ -226,10 +238,10 @@ impl Model {
 
             norm_buf.copy_from_slice(&hidden);
             self.layers[layer_idx].mlp_norm.forward(&mut norm_buf);
-            let mlp_out = self.layers[layer_idx].mlp.forward(&norm_buf);
+            self.layers[layer_idx].mlp.forward_into(&norm_buf, &mut mlp_out, &mut gate_buf, &mut up_buf);
             let mlp_norm: f32 = mlp_out.iter().map(|v| v * v).sum::<f32>().sqrt();
 
-            for (h, m) in hidden.iter_mut().zip(mlp_out.iter()) {
+            for (h, &m) in hidden.iter_mut().zip(mlp_out.iter()) {
                 *h += m;
             }
 

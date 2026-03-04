@@ -100,6 +100,21 @@ impl Attention {
         rope: &RotaryEmbedding,
         kv_cache: &mut KvCache,
     ) -> Vec<f32> {
+        let hidden_size = self.o_proj.out_features();
+        let mut output = vec![0.0f32; hidden_size];
+        self.forward_into(input, position, rope, kv_cache, &mut output);
+        output
+    }
+
+    /// Forward pass writing into a pre-allocated output buffer.
+    pub fn forward_into(
+        &self,
+        input: &[f32],
+        position: usize,
+        rope: &RotaryEmbedding,
+        kv_cache: &mut KvCache,
+        output: &mut [f32],
+    ) {
         let q_dim = self.num_heads * self.head_dim;
         let kv_dim = self.num_kv_heads * self.head_dim;
 
@@ -167,25 +182,24 @@ impl Attention {
 
         // Compute attention for each Q head
         let mut attn_concat = vec![0.0f32; q_dim];
+        let mut scores = vec![0.0f32; seq_len];
 
         for h in 0..self.num_heads {
             let kv_h = h / self.gqa_group_size;
             let q_head = &q[h * self.head_dim..(h + 1) * self.head_dim];
 
-            // Compute attention scores over all cached positions
-            let mut scores: Vec<f32> = (0..seq_len)
-                .map(|j| {
-                    let k_j = kv_cache.k_at(kv_h, j);
-                    dense_dot_dense_simd(q_head, k_j) * inv_sqrt_dk
-                })
-                .collect();
+            // Compute attention scores over all cached positions (reuse buffer)
+            for j in 0..seq_len {
+                let k_j = kv_cache.k_at(kv_h, j);
+                scores[j] = dense_dot_dense_simd(q_head, k_j) * inv_sqrt_dk;
+            }
 
             // Softmax
-            softmax_inplace(&mut scores);
+            softmax_inplace(&mut scores[..seq_len]);
 
             // Weighted sum of V
             let head_out = &mut attn_concat[h * self.head_dim..(h + 1) * self.head_dim];
-            for (j, &score) in scores.iter().enumerate() {
+            for (j, &score) in scores[..seq_len].iter().enumerate() {
                 let v_j = kv_cache.v_at(kv_h, j);
                 for (d, &vv) in head_out.iter_mut().zip(v_j.iter()) {
                     *d += score * vv;
@@ -201,11 +215,8 @@ impl Attention {
         }
 
         // Output projection
-        let hidden_size = self.o_proj.out_features();
-        let mut output = vec![0.0f32; hidden_size];
-        self.o_proj.forward(&attn_concat, &mut output);
-
-        output
+        output.iter_mut().for_each(|v| *v = 0.0);
+        self.o_proj.forward(&attn_concat, output);
     }
 }
 

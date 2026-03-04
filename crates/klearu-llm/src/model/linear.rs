@@ -7,16 +7,32 @@ use klearu_accel::simd::dense_dot_dense_simd;
 /// Uses SIMD-accelerated dot products for forward pass.
 pub struct Linear {
     pub weights: ContiguousWeightStore,
+    /// Pre-quantized weights for Q32.32 MPC: each f32 weight → `(w as f64 * 2^32).round() as i64`.
+    /// Layout mirrors `weights` (same stride). Call `sync_q32()` after modifying weights.
+    pub weights_q32: Vec<i64>,
     in_features: usize,
     out_features: usize,
 }
 
 impl Linear {
     pub fn new(in_features: usize, out_features: usize) -> Self {
+        let store = ContiguousWeightStore::new(out_features, in_features);
+        let total = store.as_raw_slice().len();
         Self {
-            weights: ContiguousWeightStore::new(out_features, in_features),
+            weights: store,
+            weights_q32: vec![0i64; total],
             in_features,
             out_features,
+        }
+    }
+
+    /// Synchronize `weights_q32` from current `weights`.
+    /// Must be called after modifying weights and before MPC inference.
+    pub fn sync_q32(&mut self) {
+        let raw = self.weights.as_raw_slice();
+        self.weights_q32.resize(raw.len(), 0);
+        for (dst, &src) in self.weights_q32.iter_mut().zip(raw.iter()) {
+            *dst = (src as f64 * 4294967296.0).round() as i64;
         }
     }
 

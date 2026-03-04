@@ -205,6 +205,14 @@ impl GatedDeltaNet {
     /// `input` has shape [hidden_size].
     /// Returns output of shape [hidden_size].
     pub fn forward_decode(&self, input: &[f32], state: &mut DeltaNetState) -> Vec<f32> {
+        let hidden_size = self.out_proj.out_features();
+        let mut output = vec![0.0f32; hidden_size];
+        self.forward_decode_into(input, state, &mut output);
+        output
+    }
+
+    /// Forward pass writing into a pre-allocated output buffer.
+    pub fn forward_decode_into(&self, input: &[f32], state: &mut DeltaNetState, output: &mut [f32]) {
         let qkv_dim = self.conv_dim;
         let z_dim = self.num_heads * self.value_dim;
 
@@ -234,12 +242,11 @@ impl GatedDeltaNet {
             conv_out[ch] = silu(sum);
         }
 
-        // 3. Split conv_out into q, k, v per head
+        // 3. Split conv_out into q, k, v per head (zero-copy via split_at_mut)
         let q_total = self.num_heads * self.key_dim;
         let k_total = self.num_heads * self.key_dim;
-        let mut q_data = conv_out[..q_total].to_vec();
-        let mut k_data = conv_out[q_total..q_total + k_total].to_vec();
-        let v_data = &conv_out[q_total + k_total..];
+        let (qk_part, v_data) = conv_out.split_at_mut(q_total + k_total);
+        let (q_data, k_data) = qk_part.split_at_mut(q_total);
 
         // L2-normalize Q and K per head, then scale Q by 1/sqrt(key_dim)
         let inv_sqrt_dk = 1.0 / (self.key_dim as f32).sqrt();
@@ -274,6 +281,7 @@ impl GatedDeltaNet {
 
         // 5. Per-head recurrence and output
         let mut output_heads = vec![0.0f32; z_dim];
+        let mut err = vec![0.0f32; self.value_dim];
 
         for h in 0..self.num_heads {
             let q_h = &q_data[h * self.key_dim..(h + 1) * self.key_dim];
@@ -288,32 +296,35 @@ impl GatedDeltaNet {
                 *val *= a;
             }
 
-            // err_j = v_j - sum_i(S[i,j] * k_i) for each value dim j
-            let mut err = vec![0.0f32; self.value_dim];
-            for j in 0..self.value_dim {
-                let mut dot = 0.0f32;
-                for i in 0..self.key_dim {
-                    dot += s[i * self.value_dim + j] * k_h[i];
+            // err = v - S^T · k (restructured for contiguous inner-loop access)
+            err.copy_from_slice(v_h);
+            for i in 0..self.key_dim {
+                let k_i = k_h[i];
+                let s_row = &s[i * self.value_dim..(i + 1) * self.value_dim];
+                for j in 0..self.value_dim {
+                    err[j] -= s_row[j] * k_i;
                 }
-                err[j] = v_h[j] - dot;
             }
 
             // S[i,j] += beta * k_i * err_j
             let b = beta[h];
             for i in 0..self.key_dim {
+                let bk = b * k_h[i];
+                let s_row = &mut s[i * self.value_dim..(i + 1) * self.value_dim];
                 for j in 0..self.value_dim {
-                    s[i * self.value_dim + j] += b * k_h[i] * err[j];
+                    s_row[j] += bk * err[j];
                 }
             }
 
-            // o_j = sum_i(S[i,j] * q_i)
+            // o = S^T · q (restructured for contiguous inner-loop access)
             let o_h = &mut output_heads[h * self.value_dim..(h + 1) * self.value_dim];
-            for j in 0..self.value_dim {
-                let mut dot = 0.0f32;
-                for i in 0..self.key_dim {
-                    dot += s[i * self.value_dim + j] * q_h[i];
+            o_h.fill(0.0);
+            for i in 0..self.key_dim {
+                let q_i = q_h[i];
+                let s_row = &s[i * self.value_dim..(i + 1) * self.value_dim];
+                for j in 0..self.value_dim {
+                    o_h[j] += s_row[j] * q_i;
                 }
-                o_h[j] = dot;
             }
         }
 
@@ -340,11 +351,8 @@ impl GatedDeltaNet {
         }
 
         // 7. Output projection
-        let hidden_size = self.out_proj.out_features();
-        let mut output = vec![0.0f32; hidden_size];
-        self.out_proj.forward(&output_heads, &mut output);
-
-        output
+        output.iter_mut().for_each(|v| *v = 0.0);
+        self.out_proj.forward(&output_heads, output);
     }
 }
 

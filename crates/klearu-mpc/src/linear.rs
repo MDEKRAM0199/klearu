@@ -2,6 +2,7 @@ use crate::beaver::BeaverTriple;
 use crate::fixed_point::SCALE_64;
 use crate::sharing::{SharedVec, SharedVec64};
 use crate::transport::Transport;
+use klearu_accel::simd::dense_dot_dense_simd;
 use std::io;
 
 /// Shared linear forward: y_share = W * x_share.
@@ -77,6 +78,7 @@ pub fn shared_linear_forward_sparse(
 /// Used when the input is already in f32 (e.g., attention output) and we want
 /// to avoid the quantization loss of converting to Q16.16 first.
 /// Output is Q16.16 for compatibility with the rest of the pipeline.
+/// Uses SIMD-accelerated dot product for the inner loop.
 pub fn shared_linear_forward_f32_input(
     weights: &[f32],
     in_features: usize,
@@ -92,12 +94,9 @@ pub fn shared_linear_forward_f32_input(
     let mut output = Vec::with_capacity(out_features);
 
     for j in 0..out_features {
-        let row_offset = j * stride;
-        let mut acc = 0.0f64;
-        for i in 0..in_features {
-            acc += weights[row_offset + i] as f64 * x_f32[i] as f64;
-        }
-        output.push((acc * scale).round() as i64 as i32 as u32);
+        let row = &weights[j * stride..j * stride + in_features];
+        let dot = dense_dot_dense_simd(row, x_f32);
+        output.push((dot as f64 * scale).round() as i64 as i32 as u32);
     }
 
     SharedVec(output)
@@ -171,7 +170,7 @@ pub fn shared_linear_forward_sparse_64(
 /// Q32.32 variant taking f32 input (not Q32.32 shares).
 ///
 /// Used when the input is already in f32 (e.g., attention output after reveal)
-/// and we want Q32.32 output.
+/// and we want Q32.32 output. Uses SIMD-accelerated dot product.
 pub fn shared_linear_forward_f32_input_64(
     weights: &[f32],
     in_features: usize,
@@ -186,12 +185,66 @@ pub fn shared_linear_forward_f32_input_64(
     let mut output = Vec::with_capacity(out_features);
 
     for j in 0..out_features {
+        let row = &weights[j * stride..j * stride + in_features];
+        let dot = dense_dot_dense_simd(row, x_f32);
+        output.push((dot as f64 * SCALE_64).round() as i64 as u64);
+    }
+
+    SharedVec64(output)
+}
+
+// --- Pre-quantized weight variants (Optimization 1) ---
+
+/// Q32.32 shared linear forward with pre-quantized weights.
+///
+/// `weights_q32`: pre-computed `(w as f64 * 2^32).round() as i64` for each weight.
+/// Eliminates per-call f32→f64→i64 conversion in the hot loop.
+pub fn shared_linear_forward_64_pq(
+    weights_q32: &[i64],
+    in_features: usize,
+    out_features: usize,
+    x_share: &SharedVec64,
+) -> SharedVec64 {
+    let stride = if out_features > 0 { weights_q32.len() / out_features } else { in_features };
+    assert!(stride >= in_features, "stride {} < in_features {}", stride, in_features);
+    assert_eq!(weights_q32.len(), out_features * stride);
+    assert_eq!(x_share.len(), in_features);
+
+    let mut output = Vec::with_capacity(out_features);
+
+    for j in 0..out_features {
         let row_offset = j * stride;
-        let mut acc = 0.0f64;
+        let mut acc = 0i128;
         for i in 0..in_features {
-            acc += weights[row_offset + i] as f64 * x_f32[i] as f64;
+            acc += (weights_q32[row_offset + i] as i128) * (x_share.0[i] as i64 as i128);
         }
-        output.push((acc * SCALE_64).round() as i64 as u64);
+        output.push(((acc >> 32) as i64) as u64);
+    }
+
+    SharedVec64(output)
+}
+
+/// Q32.32 sparse linear forward with pre-quantized weights.
+pub fn shared_linear_forward_sparse_64_pq(
+    weights_q32: &[i64],
+    in_features: usize,
+    total_rows: usize,
+    indices: &[usize],
+    x_share: &SharedVec64,
+) -> SharedVec64 {
+    assert_eq!(x_share.len(), in_features);
+    let stride = if total_rows > 0 { weights_q32.len() / total_rows } else { in_features };
+    assert!(stride >= in_features, "stride {} < in_features {}", stride, in_features);
+
+    let mut output = Vec::with_capacity(indices.len());
+
+    for &j in indices {
+        let row_offset = j * stride;
+        let mut acc = 0i128;
+        for i in 0..in_features {
+            acc += (weights_q32[row_offset + i] as i128) * (x_share.0[i] as i64 as i128);
+        }
+        output.push(((acc >> 32) as i64) as u64);
     }
 
     SharedVec64(output)

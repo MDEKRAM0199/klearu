@@ -16,13 +16,26 @@ pub trait Transport {
         Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
     }
 
-    /// Send a slice of u32 values.
+    /// Send a slice of u32 values (zero-copy on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn send_u32_slice(&mut self, values: &[u32]) -> io::Result<()> {
+        self.send(bytemuck::cast_slice(values))
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn send_u32_slice(&mut self, values: &[u32]) -> io::Result<()> {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.send(&bytes)
     }
 
-    /// Receive n u32 values.
+    /// Receive n u32 values (bulk cast on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn recv_u32_slice(&mut self, n: usize) -> io::Result<Vec<u32>> {
+        let data = self.recv(n * 4)?;
+        Ok(bytemuck::cast_slice::<u8, u32>(&data).to_vec())
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn recv_u32_slice(&mut self, n: usize) -> io::Result<Vec<u32>> {
         let data = self.recv(n * 4)?;
         let mut values = Vec::with_capacity(n);
@@ -49,13 +62,26 @@ pub trait Transport {
         ]))
     }
 
-    /// Send a slice of u64 values.
+    /// Send a slice of u64 values (zero-copy on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn send_u64_slice(&mut self, values: &[u64]) -> io::Result<()> {
+        self.send(bytemuck::cast_slice(values))
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn send_u64_slice(&mut self, values: &[u64]) -> io::Result<()> {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.send(&bytes)
     }
 
-    /// Receive n u64 values.
+    /// Receive n u64 values (bulk cast on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn recv_u64_slice(&mut self, n: usize) -> io::Result<Vec<u64>> {
+        let data = self.recv(n * 8)?;
+        Ok(bytemuck::cast_slice::<u8, u64>(&data).to_vec())
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn recv_u64_slice(&mut self, n: usize) -> io::Result<Vec<u64>> {
         let data = self.recv(n * 8)?;
         let mut values = Vec::with_capacity(n);
@@ -85,13 +111,26 @@ pub trait Transport {
         ]))
     }
 
-    /// Send a slice of u128 values.
+    /// Send a slice of u128 values (zero-copy on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn send_u128_slice(&mut self, values: &[u128]) -> io::Result<()> {
+        self.send(bytemuck::cast_slice(values))
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn send_u128_slice(&mut self, values: &[u128]) -> io::Result<()> {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.send(&bytes)
     }
 
-    /// Receive n u128 values.
+    /// Receive n u128 values (bulk cast on LE platforms via bytemuck).
+    #[cfg(target_endian = "little")]
+    fn recv_u128_slice(&mut self, n: usize) -> io::Result<Vec<u128>> {
+        let data = self.recv(n * 16)?;
+        Ok(bytemuck::cast_slice::<u8, u128>(&data).to_vec())
+    }
+
+    #[cfg(not(target_endian = "little"))]
     fn recv_u128_slice(&mut self, n: usize) -> io::Result<Vec<u128>> {
         let data = self.recv(n * 16)?;
         let mut values = Vec::with_capacity(n);
@@ -129,9 +168,7 @@ impl Transport for MemoryTransport {
             })?;
             self.recv_buf.extend_from_slice(&data);
         }
-        let result = self.recv_buf[..len].to_vec();
-        self.recv_buf = self.recv_buf[len..].to_vec();
-        Ok(result)
+        Ok(self.recv_buf.drain(..len).collect())
     }
 }
 

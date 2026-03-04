@@ -14,7 +14,7 @@
 use klearu_llm::model::mlp::Mlp;
 use klearu_mpc::beaver::TripleGenerator;
 use klearu_mpc::fixed_point::{from_fixed, from_fixed64, SCALE_64};
-use klearu_mpc::linear::{shared_linear_forward, shared_linear_forward_64, shared_linear_forward_sparse};
+use klearu_mpc::linear::{shared_linear_forward, shared_linear_forward_64_pq, shared_linear_forward_sparse};
 use klearu_mpc::transport::Transport;
 use klearu_mpc::{SharedVec, SharedVec64};
 use std::io;
@@ -168,7 +168,7 @@ fn swiglu_reveal_64(
     Ok(SharedVec64(result))
 }
 
-/// Secure (Q32.32) dense MLP forward pass.
+/// Secure (Q32.32) dense MLP forward pass using pre-quantized weights.
 pub fn private_dense_mlp_forward_secure(
     party: u8,
     mlp: &Mlp,
@@ -178,20 +178,20 @@ pub fn private_dense_mlp_forward_secure(
     let in_features = mlp.gate_proj.in_features();
     let out_features = mlp.gate_proj.out_features();
 
-    let gate_share = shared_linear_forward_64(
-        party, mlp.gate_proj.weights.as_raw_slice(), in_features, out_features, x_share, &[], transport,
-    )?;
-    let up_share = shared_linear_forward_64(
-        party, mlp.up_proj.weights.as_raw_slice(), in_features, out_features, x_share, &[], transport,
-    )?;
+    let gate_share = shared_linear_forward_64_pq(
+        &mlp.gate_proj.weights_q32, in_features, out_features, x_share,
+    );
+    let up_share = shared_linear_forward_64_pq(
+        &mlp.up_proj.weights_q32, in_features, out_features, x_share,
+    );
 
     let activated = swiglu_reveal_64(party, &gate_share, &up_share, transport)?;
 
     let down_in = mlp.down_proj.in_features();
     let down_out = mlp.down_proj.out_features();
-    shared_linear_forward_64(
-        party, mlp.down_proj.weights.as_raw_slice(), down_in, down_out, &activated, &[], transport,
-    )
+    Ok(shared_linear_forward_64_pq(
+        &mlp.down_proj.weights_q32, down_in, down_out, &activated,
+    ))
 }
 
 #[cfg(test)]

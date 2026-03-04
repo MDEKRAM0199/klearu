@@ -81,11 +81,13 @@ pub fn rmsnorm_shared_64(
         .map(|k| (x_share.0[k] as i64 as i128 as u128).wrapping_sub(sq_triples[k].b))
         .collect();
 
-    // Exchange d and e (u128 values)
-    transport.send_u128_slice(&d_shares)?;
-    transport.send_u128_slice(&e_shares)?;
-    let d_others = transport.recv_u128_slice(n)?;
-    let e_others = transport.recv_u128_slice(n)?;
+    // Exchange d and e in a single batch (2 transport calls instead of 4)
+    let mut de_concat = Vec::with_capacity(2 * n);
+    de_concat.extend_from_slice(&d_shares);
+    de_concat.extend_from_slice(&e_shares);
+    transport.send_u128_slice(&de_concat)?;
+    let de_others = transport.recv_u128_slice(2 * n)?;
+    let (d_others, e_others) = de_others.split_at(n);
 
     // Beaver squaring: z[k] = c + a*e + d*b + [party 0: d*e]  (all in Z_{2^128})
     // z[k] is a Q32.32 × Q32.32 product → truncate >> 32 to get Q32.32 share of x²

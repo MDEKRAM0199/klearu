@@ -72,6 +72,14 @@ impl SharedVec {
         self.0.is_empty()
     }
 
+    /// In-place element-wise addition (avoids allocation).
+    pub fn add_assign(&mut self, other: &SharedVec) {
+        assert_eq!(self.len(), other.len());
+        for (a, &b) in self.0.iter_mut().zip(other.0.iter()) {
+            *a = a.wrapping_add(b);
+        }
+    }
+
     /// Create a zero-filled shared vector.
     pub fn zeros(n: usize) -> SharedVec {
         SharedVec(vec![0u32; n])
@@ -144,6 +152,14 @@ impl SharedVec64 {
     /// Whether the vector is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// In-place element-wise addition (avoids allocation).
+    pub fn add_assign(&mut self, other: &SharedVec64) {
+        assert_eq!(self.len(), other.len());
+        for (a, &b) in self.0.iter_mut().zip(other.0.iter()) {
+            *a = a.wrapping_add(b);
+        }
     }
 
     /// Create a zero-filled shared vector.

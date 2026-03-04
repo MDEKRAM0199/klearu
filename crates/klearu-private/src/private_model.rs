@@ -354,6 +354,7 @@ pub fn private_model_forward_secure(
     assert_eq!(input_share.len(), hidden_size);
 
     let mut hidden_share = input_share.clone();
+    let mut normed_buf = SharedVec64::zeros(hidden_size);
 
     // Per-layer MPC forward pass
     for layer_idx in 0..model.config.num_layers {
@@ -368,6 +369,7 @@ pub fn private_model_forward_secure(
             &model.rope,
             model.kv_caches.layer_mut(layer_idx),
             dn_state,
+            &mut normed_buf,
             triples,
             transport,
         )?;
@@ -495,6 +497,33 @@ mod tests {
         }
     }
 
+    /// Sync pre-quantized weights on all Linear projections in the model.
+    fn sync_all_q32(model: &mut Model) {
+        if let Some(ref mut head) = model.lm_head {
+            head.sync_q32();
+        }
+        for layer in &mut model.layers {
+            match &mut layer.attention {
+                AttentionLayer::Standard(attn) => {
+                    attn.q_proj.sync_q32();
+                    attn.k_proj.sync_q32();
+                    attn.v_proj.sync_q32();
+                    attn.o_proj.sync_q32();
+                }
+                AttentionLayer::GatedDeltaNet(dn) => {
+                    dn.in_proj_qkv.sync_q32();
+                    dn.in_proj_z.sync_q32();
+                    dn.in_proj_a.sync_q32();
+                    dn.in_proj_b.sync_q32();
+                    dn.out_proj.sync_q32();
+                }
+            }
+            layer.mlp.gate_proj.sync_q32();
+            layer.mlp.up_proj.sync_q32();
+            layer.mlp.down_proj.sync_q32();
+        }
+    }
+
     /// Set all projection weights on a model to small deterministic non-zero values.
     fn init_model_weights(model: &mut Model) {
         let config = &model.config;
@@ -544,6 +573,8 @@ mod tests {
                 }
             }
         }
+
+        sync_all_q32(model);
     }
 
     #[test]
@@ -1226,6 +1257,8 @@ mod tests {
                 }
             }
         }
+
+        sync_all_q32(model);
     }
 
     /// Test lower-security MPC (reveal embedding, plaintext forward) with Qwen3.5 hybrid model.

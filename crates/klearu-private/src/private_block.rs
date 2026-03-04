@@ -56,15 +56,16 @@ pub fn private_block_forward(
     rope: &RotaryEmbedding,
     kv_cache: &mut KvCache,
     deltanet_state: Option<&mut DeltaNetState>,
+    normed_buf: &mut SharedVec,
     triples: &mut impl TripleGenerator,
     transport: &mut impl Transport,
 ) -> io::Result<()> {
-    // 1. Pre-attention RMSNorm
-    let mut normed = hidden_share.clone();
+    // 1. Pre-attention RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let attn_weights = effective_norm_weights(&block.attn_norm);
     rmsnorm_shared(
         party,
-        &mut normed,
+        normed_buf,
         &attn_weights,
         block.attn_norm.eps(),
         transport,
@@ -74,12 +75,12 @@ pub fn private_block_forward(
     let attn_out = match &block.attention {
         AttentionLayer::Standard(attn) => {
             private_attention_forward(
-                party, attn, &normed, position, rope, kv_cache, transport,
+                party, attn, normed_buf, position, rope, kv_cache, transport,
             )?
         }
         AttentionLayer::GatedDeltaNet(dn) => {
             // Reveal-and-compute: reveal normed hidden state, run DeltaNet in plaintext
-            let normed_f32: Vec<f32> = normed.0.iter().map(|&v| from_fixed(v)).collect();
+            let normed_f32: Vec<f32> = normed_buf.0.iter().map(|&v| from_fixed(v)).collect();
             let normed_plain = reveal_f32_shares(&normed_f32, transport)?;
 
             let state = deltanet_state
@@ -96,14 +97,14 @@ pub fn private_block_forward(
     };
 
     // 3. Residual
-    *hidden_share = hidden_share.add(&attn_out);
+    hidden_share.add_assign(&attn_out);
 
-    // 4. Pre-MLP RMSNorm
-    let mut normed_mlp = hidden_share.clone();
+    // 4. Pre-MLP RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let mlp_weights = effective_norm_weights(&block.mlp_norm);
     rmsnorm_shared(
         party,
-        &mut normed_mlp,
+        normed_buf,
         &mlp_weights,
         block.mlp_norm.eps(),
         transport,
@@ -113,13 +114,13 @@ pub fn private_block_forward(
     let mlp_out = private_dense_mlp_forward(
         party,
         &block.mlp,
-        &normed_mlp,
+        normed_buf,
         triples,
         transport,
     )?;
 
-    // 6. Residual
-    *hidden_share = hidden_share.add(&mlp_out);
+    // 6. Residual (in-place)
+    hidden_share.add_assign(&mlp_out);
 
     Ok(())
 }
@@ -134,15 +135,16 @@ pub fn private_block_forward_sparse(
     kv_cache: &mut KvCache,
     deltanet_state: Option<&mut DeltaNetState>,
     neuron_indices: &[usize],
+    normed_buf: &mut SharedVec,
     triples: &mut impl TripleGenerator,
     transport: &mut impl Transport,
 ) -> io::Result<()> {
-    // 1. Pre-attention RMSNorm
-    let mut normed = hidden_share.clone();
+    // 1. Pre-attention RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let attn_weights = effective_norm_weights(&block.attn_norm);
     rmsnorm_shared(
         party,
-        &mut normed,
+        normed_buf,
         &attn_weights,
         block.attn_norm.eps(),
         transport,
@@ -152,11 +154,11 @@ pub fn private_block_forward_sparse(
     let attn_out = match &block.attention {
         AttentionLayer::Standard(attn) => {
             private_attention_forward(
-                party, attn, &normed, position, rope, kv_cache, transport,
+                party, attn, normed_buf, position, rope, kv_cache, transport,
             )?
         }
         AttentionLayer::GatedDeltaNet(dn) => {
-            let normed_f32: Vec<f32> = normed.0.iter().map(|&v| from_fixed(v)).collect();
+            let normed_f32: Vec<f32> = normed_buf.0.iter().map(|&v| from_fixed(v)).collect();
             let normed_plain = reveal_f32_shares(&normed_f32, transport)?;
 
             let state = deltanet_state
@@ -171,15 +173,15 @@ pub fn private_block_forward_sparse(
         }
     };
 
-    // 3. Residual
-    *hidden_share = hidden_share.add(&attn_out);
+    // 3. Residual (in-place)
+    hidden_share.add_assign(&attn_out);
 
-    // 4. Pre-MLP RMSNorm
-    let mut normed_mlp = hidden_share.clone();
+    // 4. Pre-MLP RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let mlp_weights = effective_norm_weights(&block.mlp_norm);
     rmsnorm_shared(
         party,
-        &mut normed_mlp,
+        normed_buf,
         &mlp_weights,
         block.mlp_norm.eps(),
         transport,
@@ -189,14 +191,14 @@ pub fn private_block_forward_sparse(
     let mlp_out = private_sparse_mlp_forward(
         party,
         &block.mlp,
-        &normed_mlp,
+        normed_buf,
         neuron_indices,
         triples,
         transport,
     )?;
 
-    // 6. Residual
-    *hidden_share = hidden_share.add(&mlp_out);
+    // 6. Residual (in-place)
+    hidden_share.add_assign(&mlp_out);
 
     Ok(())
 }
@@ -215,15 +217,16 @@ pub fn private_block_forward_secure(
     rope: &RotaryEmbedding,
     kv_cache: &mut KvCache,
     deltanet_state: Option<&mut DeltaNetState>,
+    normed_buf: &mut SharedVec64,
     triples: &mut impl TripleGenerator128,
     transport: &mut impl Transport,
 ) -> io::Result<()> {
-    // 1. Pre-attention RMSNorm (privacy-preserving)
-    let mut normed = hidden_share.clone();
+    // 1. Pre-attention RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let attn_weights = effective_norm_weights(&block.attn_norm);
     rmsnorm_shared_64(
         party,
-        &mut normed,
+        normed_buf,
         &attn_weights,
         block.attn_norm.eps(),
         triples,
@@ -234,25 +237,25 @@ pub fn private_block_forward_secure(
     let attn_out = match &block.attention {
         AttentionLayer::Standard(attn) => {
             private_attention_forward_secure(
-                party, attn, &normed, position, rope, kv_cache, transport,
+                party, attn, normed_buf, position, rope, kv_cache, transport,
             )?
         }
         AttentionLayer::GatedDeltaNet(dn) => {
             let state = deltanet_state
                 .expect("DeltaNet state required for GatedDeltaNet layer");
-            private_deltanet_forward_secure(party, dn, &normed, state, transport)?
+            private_deltanet_forward_secure(party, dn, normed_buf, state, transport)?
         }
     };
 
-    // 3. Residual
-    *hidden_share = hidden_share.add(&attn_out);
+    // 3. Residual (in-place, avoids allocation)
+    hidden_share.add_assign(&attn_out);
 
-    // 4. Pre-MLP RMSNorm (privacy-preserving)
-    let mut normed_mlp = hidden_share.clone();
+    // 4. Pre-MLP RMSNorm (reuse scratch buffer, no clone)
+    normed_buf.0.copy_from_slice(&hidden_share.0);
     let mlp_weights = effective_norm_weights(&block.mlp_norm);
     rmsnorm_shared_64(
         party,
-        &mut normed_mlp,
+        normed_buf,
         &mlp_weights,
         block.mlp_norm.eps(),
         triples,
@@ -263,12 +266,12 @@ pub fn private_block_forward_secure(
     let mlp_out = private_dense_mlp_forward_secure(
         party,
         &block.mlp,
-        &normed_mlp,
+        normed_buf,
         transport,
     )?;
 
-    // 6. Residual
-    *hidden_share = hidden_share.add(&mlp_out);
+    // 6. Residual (in-place, avoids allocation)
+    hidden_share.add_assign(&mlp_out);
 
     Ok(())
 }
@@ -337,15 +340,17 @@ mod tests {
         let mut kv0 = KvCache::new(config.num_kv_heads, config.max_seq_len, config.head_dim);
         let mut kv1 = KvCache::new(config.num_kv_heads, config.max_seq_len, config.head_dim);
 
+        let mut normed_buf1 = SharedVec(vec![0u32; config.hidden_size]);
         let handle = std::thread::spawn(move || {
             private_block_forward(
-                1, &block1, &mut share1, 0, &rope_clone, &mut kv1, None, &mut gen1, &mut trans_b,
+                1, &block1, &mut share1, 0, &rope_clone, &mut kv1, None, &mut normed_buf1, &mut gen1, &mut trans_b,
             ).unwrap();
             share1
         });
 
+        let mut normed_buf0 = SharedVec(vec![0u32; config.hidden_size]);
         private_block_forward(
-            0, &block, &mut share0, 0, &rope, &mut kv0, None, &mut gen0, &mut trans_a,
+            0, &block, &mut share0, 0, &rope, &mut kv0, None, &mut normed_buf0, &mut gen0, &mut trans_a,
         ).unwrap();
 
         let share1 = handle.join().unwrap();

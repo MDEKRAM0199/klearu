@@ -21,7 +21,7 @@ pub fn sparse_dot_dense_simd(indices: &[u32], values: &[f32], dense: &[f32]) -> 
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { sparse_dot_dense_avx2(indices, values, dense) };
         }
     }
@@ -56,7 +56,7 @@ pub fn dense_dot_dense_simd(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { dense_dot_dense_avx2(a, b) };
         }
     }
@@ -88,7 +88,7 @@ pub fn scatter_add_simd(indices: &[u32], values: &[f32], dense: &mut [f32], scal
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             unsafe {
                 scatter_add_avx2(indices, values, dense, scale);
             }
@@ -124,7 +124,7 @@ use std::arch::x86_64::*;
 
 /// Horizontal sum of all 8 lanes of a `__m256`.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn hsum_avx2(v: __m256) -> f32 {
     // v = [a0 a1 a2 a3 | a4 a5 a6 a7]
     // high128 = [a4 a5 a6 a7]
@@ -141,7 +141,7 @@ unsafe fn hsum_avx2(v: __m256) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn sparse_dot_dense_avx2(indices: &[u32], values: &[f32], dense: &[f32]) -> f32 {
     let n = indices.len();
     let chunks = n / 8;
@@ -155,8 +155,8 @@ unsafe fn sparse_dot_dense_avx2(indices: &[u32], values: &[f32], dense: &[f32]) 
         let gathered = _mm256_i32gather_ps::<4>(dense.as_ptr(), idx);
         // Load 8 values
         let vals = _mm256_loadu_ps(values.as_ptr().add(offset));
-        // Multiply and accumulate
-        acc = _mm256_add_ps(acc, _mm256_mul_ps(vals, gathered));
+        // Fused multiply-accumulate
+        acc = _mm256_fmadd_ps(vals, gathered, acc);
     }
 
     let mut sum = hsum_avx2(acc);
@@ -170,22 +170,36 @@ unsafe fn sparse_dot_dense_avx2(indices: &[u32], values: &[f32], dense: &[f32]) 
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn dense_dot_dense_avx2(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len();
-    let chunks = n / 8;
-    let mut acc = _mm256_setzero_ps();
+    let chunks = n / 16;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
 
     for c in 0..chunks {
-        let offset = c * 8;
-        let va = _mm256_loadu_ps(a.as_ptr().add(offset));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-        acc = _mm256_add_ps(acc, _mm256_mul_ps(va, vb));
+        let offset = c * 16;
+        let va0 = _mm256_loadu_ps(a.as_ptr().add(offset));
+        let vb0 = _mm256_loadu_ps(b.as_ptr().add(offset));
+        acc0 = _mm256_fmadd_ps(va0, vb0, acc0);
+        let va1 = _mm256_loadu_ps(a.as_ptr().add(offset + 8));
+        let vb1 = _mm256_loadu_ps(b.as_ptr().add(offset + 8));
+        acc1 = _mm256_fmadd_ps(va1, vb1, acc1);
     }
 
-    let mut sum = hsum_avx2(acc);
+    // Handle remaining 8-element chunk
+    let remainder_start = chunks * 16;
+    if remainder_start + 8 <= n {
+        let va = _mm256_loadu_ps(a.as_ptr().add(remainder_start));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(remainder_start));
+        acc0 = _mm256_fmadd_ps(va, vb, acc0);
+    }
 
-    for i in (chunks * 8)..n {
+    let mut sum = hsum_avx2(_mm256_add_ps(acc0, acc1));
+
+    // Scalar remainder
+    let scalar_start = if remainder_start + 8 <= n { remainder_start + 8 } else { remainder_start };
+    for i in scalar_start..n {
         sum += a[i] * b[i];
     }
 
@@ -193,7 +207,7 @@ unsafe fn dense_dot_dense_avx2(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn scatter_add_avx2(indices: &[u32], values: &[f32], dense: &mut [f32], scale: f32) {
     let n = indices.len();
     let scale_vec = _mm256_set1_ps(scale);
@@ -271,19 +285,33 @@ unsafe fn sparse_dot_dense_neon(indices: &[u32], values: &[f32], dense: &[f32]) 
 #[cfg(target_arch = "aarch64")]
 unsafe fn dense_dot_dense_neon(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len();
-    let chunks = n / 4;
-    let mut acc = vdupq_n_f32(0.0);
+    let chunks = n / 8;
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
 
     for c in 0..chunks {
-        let offset = c * 4;
-        let va = vld1q_f32(a.as_ptr().add(offset));
-        let vb = vld1q_f32(b.as_ptr().add(offset));
-        acc = vfmaq_f32(acc, va, vb);
+        let offset = c * 8;
+        let va0 = vld1q_f32(a.as_ptr().add(offset));
+        let vb0 = vld1q_f32(b.as_ptr().add(offset));
+        acc0 = vfmaq_f32(acc0, va0, vb0);
+        let va1 = vld1q_f32(a.as_ptr().add(offset + 4));
+        let vb1 = vld1q_f32(b.as_ptr().add(offset + 4));
+        acc1 = vfmaq_f32(acc1, va1, vb1);
     }
 
-    let mut sum = hsum_neon(acc);
+    // Handle remaining 4-element chunk
+    let remainder_start = chunks * 8;
+    if remainder_start + 4 <= n {
+        let va = vld1q_f32(a.as_ptr().add(remainder_start));
+        let vb = vld1q_f32(b.as_ptr().add(remainder_start));
+        acc0 = vfmaq_f32(acc0, va, vb);
+    }
 
-    for i in (chunks * 4)..n {
+    let mut sum = hsum_neon(vaddq_f32(acc0, acc1));
+
+    // Scalar remainder
+    let scalar_start = if remainder_start + 4 <= n { remainder_start + 4 } else { remainder_start };
+    for i in scalar_start..n {
         sum += a[i] * b[i];
     }
 

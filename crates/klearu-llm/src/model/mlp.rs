@@ -21,23 +21,34 @@ impl Mlp {
     }
 
     pub fn forward(&self, input: &[f32]) -> Vec<f32> {
+        let hidden_size = self.down_proj.out_features();
+        let mut output = vec![0.0f32; hidden_size];
         let mut gate = vec![0.0f32; self.intermediate_size];
         let mut up = vec![0.0f32; self.intermediate_size];
+        self.forward_into(input, &mut output, &mut gate, &mut up);
+        output
+    }
 
-        self.gate_proj.forward(input, &mut gate);
-        self.up_proj.forward(input, &mut up);
+    /// Forward pass writing into pre-allocated buffers.
+    /// `gate_buf` and `up_buf` must each be >= `intermediate_size`.
+    pub fn forward_into(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        gate_buf: &mut [f32],
+        up_buf: &mut [f32],
+    ) {
+        self.gate_proj.forward(input, gate_buf);
+        self.up_proj.forward(input, up_buf);
 
         // SiLU(gate) * up
-        for (g, u) in gate.iter_mut().zip(up.iter()) {
+        for (g, u) in gate_buf.iter_mut().zip(up_buf.iter()).take(self.intermediate_size) {
             *g = silu(*g) * u;
         }
 
         // Down projection
-        let hidden_size = self.down_proj.out_features();
-        let mut output = vec![0.0f32; hidden_size];
-        self.down_proj.forward(&gate, &mut output);
-
-        output
+        output.iter_mut().for_each(|v| *v = 0.0);
+        self.down_proj.forward(&gate_buf[..self.intermediate_size], output);
     }
 }
 
